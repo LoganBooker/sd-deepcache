@@ -11,6 +11,8 @@ Only tested with SDXL, but should work with other models.
 > [!NOTE]
 > The extension patches the Unet forward pass, so other extensions that also do this might not play nicely. There is no easy fix as far as I'm aware.
 
+![sd-forge-example-image](assets/deepcache_script_ui.png)
+
 ## Improvements
 
 - Keyed-cache dictionary to handle situations where the batch size changes during diffusion. This fixes errors such as `Expected size 2 but got size 1 for tensor number 1 in the list`, which is common when other extensions manipulate conditional/unconditional batching, such as Perturbed-Attention Guidance.
