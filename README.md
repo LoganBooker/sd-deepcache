@@ -8,7 +8,7 @@ Only tested with SDXL, but should work with other models.
 
 `git clone https://github.com/LoganBooker/sd-deepcache.git` into `stable-diffusion-webui-forge/extensions/` folder.
 
-> [!NOTE]
+> [!WARNING]
 > The extension patches the Unet forward pass, so other extensions that also do this might not play nicely. There is no easy fix as far as I'm aware.
 
 ![sd-forge-example-image](assets/deepcache_script_ui.png)
