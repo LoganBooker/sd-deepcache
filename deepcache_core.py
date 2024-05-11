@@ -12,21 +12,113 @@ import torch
 import math
 from ldm_patched.ldm.modules.diffusionmodules.openaimodel import forward_timestep_embed, timestep_embedding, th, apply_control
 
+class DeepCacheStore:
+    def __init__(self, depth, interval, start_step, end_step, force_step, pow_curve):
+        self.step_shape = None
+        self.current_timestep = -1
+        self.total_steps = 0
+
+        # TODO: Cache age... entries older than interval should probably not be reused.
+
+        # Cache is a keyed dictionary based on batch size. Also store step and timestep
+        # information per key. Different batch sizes should not affect each other. For example,
+        # a PAG step with a single batch, versus a regular batch.
+        self.cache = {}
+
+        self.depth = depth
+        self.interval = interval
+        self.start_step = start_step
+        self.end_step = end_step
+        self.force_step = force_step
+        self.pow_curve = pow_curve
+
+    def __get_cache_interval(self):
+        if self.pow_curve <= 0:
+            return self.interval
+        
+        step_mod = self.current_timestep - self.start_step
+        step_mod_end = 1000 - self.start_step
+        step_frac = (step_mod / step_mod_end) ** self.pow_curve
+
+        return 1 + round((self.interval - 1) * step_frac)
+
+    def __have_cache_for_key(self):
+        return self.step_shape in self.cache
+
+    def __is_cache_active(self):
+        return self.start_step <= self.current_timestep <= self.end_step
+
+    def __is_caching_step(self):
+        if self.force_step > 0 and self.current_timestep >= self.force_step and self.__have_cache_for_key():
+            return False
+
+        cache = self.cache.get(self.step_shape)
+        interval = self.__get_cache_interval()
+
+        return cache is None or cache["step"] % interval == 0
+
+    def setup(self, value, step):
+        self.step_shape = value.shape[0]
+        self.current_timestep = step
+
+    def skip_unet_block(self, block_id, i=0, block_count=0):
+        if not self.__is_cache_active():
+            return False
+        
+        if self.__is_caching_step():
+            return False
+        
+        match block_id:
+            case "input":
+                return i > self.depth
+            case "middle":
+                return True
+            case "output":
+                return i < block_count - self.depth - 1
+
+        print(f'Invalid block id {block_id}!')
+        return False
+
+    def cache_unet_block(self, i, block_count):
+        is_cache_level = i == block_count - self.depth - 1
+        is_active = self.__is_cache_active()
+        is_cache_step = self.__is_caching_step()
+
+        # active, cache_step
+        return (is_active and is_cache_level, is_cache_step)
+    
+    def get_cache(self):
+        cache = self.cache.get(self.step_shape)
+        return None if cache is None else cache["value"]
+    
+    def set_cache(self, value):
+        self.cache[self.step_shape] = { "value": value, "step": 0, "timestep": -1 }
+
+    def update_step(self):
+        if self.__is_cache_active():
+            if self.__have_cache_for_key():
+                key = self.step_shape
+                timestep = self.cache[key]["timestep"]
+
+                # Don't increment step if the timestep hasn't changed.
+                if self.current_timestep > timestep:
+                    self.cache[key]["step"] += 1
+                    self.cache[key]["timestep"] = self.current_timestep
+        else:
+            for key in self.cache:
+                self.cache[key]["step"] = 0
+
 class DeepCache:
     def apply(self, model, arg_cache_interval, cache_depth, start_step, end_step, force_step, pow_curve):
         new_model = model.clone()
         m = new_model.model
         unet = m.diffusion_model
 
-        current_t = -1
-        current_step = -1
-        cache_h = {}
-
-        original_cache_interval = arg_cache_interval
+        cache_store = DeepCacheStore(cache_depth, arg_cache_interval, start_step, end_step, force_step, pow_curve)
 
         def apply_model(model_function, kwargs):
 
-            nonlocal current_t, current_step, cache_h, unet, m, original_cache_interval
+            nonlocal unet, m, cache_store
             
             xa = kwargs["input"]
             t = kwargs["timestep"]
@@ -78,59 +170,6 @@ class DeepCache:
             transformer_patches = transformer_options.get("patches", {})
             block_modifiers = transformer_options.get("block_modifiers", [])
 
-            # unet次回実行はtimestepが上がってると仮定・・Refiner等でエラーが起きるかも
-            active_t = t[0].item()
-
-            if active_t > current_t:
-                current_step = -1
-
-            current_t = active_t
-
-            cache_interval = original_cache_interval
-
-            real_step = 1000 - current_t
-            apply = False
-
-            if end_step > start_step:
-                apply = real_step >= start_step and real_step <= end_step
-
-                # Apply a power curve to the interval. We start from 1 and slower increase the interval
-                # to the user-provided cache_interval. Cosine/smoothstep might be better here, so we spend
-                # at least some time at the higher cache interval.
-                
-                # This is not used by default, as it's a hard value to tune, though 4 seems to work well.
-                if pow_curve > 0 and apply and real_step >= start_step:
-                    step_mod = real_step - start_step
-                    step_mod_end = 1000 - start_step
-                    step_frac = (step_mod / step_mod_end) ** pow_curve
-
-                    cache_interval = 1 + round((original_cache_interval - 1) * step_frac)
-            else:
-                # If the start step is greater than end, we treat it as the interval in which caching
-                # should be disabled, rather than enabled. Can't see a situation where this would be
-                # better than the default behaviour, but we provide the option anyway.
-                apply = real_step >= start_step or real_step <= end_step
-
-            if apply:
-                current_step += 1
-            else:
-                current_step = -1
-
-            # Allow caching of different batch sizes. Batch sizes are usually changed by other extensions,
-            # or when guidance is disabled.
-            cache_shape_key = x.shape[0]
-            is_caching_step = current_step % cache_interval == 0
-            have_cache_value = cache_shape_key in cache_h
-
-            # Don't bother caching on the last few steps.
-            if force_step > 0 and real_step >= force_step and have_cache_value:
-                apply = True
-                is_caching_step = False
-            elif apply and not is_caching_step and not have_cache_value:
-                print(f'\n[DEEPCACHE] Shape {cache_shape_key} not found in cache. Forcing cache step.\n')
-                current_step = 0
-                is_caching_step = True
-
             # This code must be kept in sync.
             # https://github.com/lllyasviel/stable-diffusion-webui-forge/blob/29be1da7cf2b5dccfc70fbdd33eb35c56a31ffb7/ldm_patched/ldm/modules/diffusionmodules/openaimodel.py#L831
             assert (y is not None) == (
@@ -145,7 +184,12 @@ class DeepCache:
                 emb = emb + unet.label_emb(y)
 
             h = x
+            cache_store.setup(h, 1000 - t[0].item())
+
             for id, module in enumerate(unet.input_blocks):
+                if cache_store.skip_unet_block("input", id):
+                    break
+
                 transformer_options["block"] = ("input", id)
 
                 for block_modifier in block_modifiers:
@@ -167,12 +211,8 @@ class DeepCache:
                     patch = transformer_patches["input_block_patch_after_skip"]
                     for p in patch:
                         h = p(h, transformer_options)
-                
-                if id == cache_depth and apply:
-                    if not is_caching_step:
-                        break # cache位置以降はスキップ
 
-            if is_caching_step or not apply:
+            if not cache_store.skip_unet_block("middle"):
                 transformer_options["block"] = ("middle", 0)
 
                 for block_modifier in block_modifiers:
@@ -184,17 +224,19 @@ class DeepCache:
                 for block_modifier in block_modifiers:
                     h = block_modifier(h, 'after', transformer_options)
 
+            block_count = len(unet.output_blocks)
             for id, module in enumerate(unet.output_blocks):
-                if id < len(unet.output_blocks) - cache_depth - 1 and apply:
-                    if not is_caching_step:
-                        continue # cache位置以前はスキップ
-                
-                if id == len(unet.output_blocks) - cache_depth - 1 and apply:
-                    if is_caching_step:
-                        cache_h[cache_shape_key] = h # cache
+                if cache_store.skip_unet_block("output", id, block_count):
+                    continue
+
+                is_active, cache_step = cache_store.cache_unet_block(id, block_count)
+
+                if is_active:
+                    if cache_step:
+                        cache_store.set_cache(h)
                     else:
-                        h = cache_h[cache_shape_key] # load cache
-                
+                        h = cache_store.get_cache()
+
                 transformer_options["block"] = ("output", id)
                 hsp = hs.pop()
                 hsp = apply_control(hsp, control, 'output')
@@ -204,7 +246,7 @@ class DeepCache:
                     for p in patch:
                         h, hsp = p(h, hsp, transformer_options)
 
-                h = th.cat([h, hsp], dim=1)
+                h = torch.cat([h, hsp], dim=1)
                 del hsp
                 if len(hs) > 0:
                     output_shape = hs[-1].shape
@@ -232,6 +274,8 @@ class DeepCache:
             
             for block_modifier in block_modifiers:
                 h = block_modifier(h, 'after', transformer_options)
+
+            cache_store.update_step()
 
             return m.model_sampling.calculate_denoised(sigma, model_output, xa)
 
