@@ -79,7 +79,7 @@ class DeepCacheScript(scripts.Script):
             # For the hires pass, ignore various settings that we can't
             # apply consistently. Essentially, we use DeepCache for the entire
             # hires process (if enabled)
-            use_optimisations = 0                
+            pow_curve = 0                
             start_step = 0
             end_step = 999999999
             force_step = 0
