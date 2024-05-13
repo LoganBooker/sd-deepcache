@@ -268,8 +268,9 @@ class DeepCache:
         # Patch the forward method of the model. If we haven't patched it already, we use a decorator to
         # store the original forward pass on our patched method.
         if not hasattr(new_model.model.diffusion_model.forward, DeepCache.ORIGINAL_FORWARD_ATTRIBUTE):
-            if (type(original_forward) == types.MethodType):
-                print("\n[DeepCache] Warning: Unet forward pass appears to be patched by another extension! DeepCache disabled.")
+            method_name = new_model.model.diffusion_model.forward.__qualname__
+            if (method_name != 'UNetModel.forward'):
+                print(f"\n[DeepCache] Warning: Unet forward pass appears to be patched by another extension ({method_name})! DeepCache disabled.")
                 return
             
             new_model.model.diffusion_model.forward = types.MethodType(forward_deepcache_patched, new_model.model.diffusion_model)
