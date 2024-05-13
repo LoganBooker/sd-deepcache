@@ -48,11 +48,10 @@ class DeepCacheScript(scripts.Script):
     def process_before_every_sampling(self, p, *script_args, **kwargs):
         deepcache_mode, cache_interval, cache_depth, start_step, end_step, force_step, hr_cache_interval, hr_cache_depth, use_first_pass_settings, pow_curve = script_args
 
-        if deepcache_mode == 'None':
-            return
-        elif deepcache_mode == 'First' and p.is_hr_pass:
-            return
-        elif deepcache_mode == 'Hires' and not p.is_hr_pass:
+        unet = p.sd_model.forge_objects.unet
+
+        if (deepcache_mode == 'None') or (deepcache_mode == 'First' and p.is_hr_pass) or (deepcache_mode == 'Hires' and not p.is_hr_pass):
+            deepcache_helper.try_remove(unet)
             return
 
         # Set infotext before we modify the values.
@@ -68,8 +67,6 @@ class DeepCacheScript(scripts.Script):
             hr_cache_depth=hr_cache_depth,
             pow_curve=pow_curve
         ))
-
-        unet = p.sd_model.forge_objects.unet
 
         if p.is_hr_pass: 
             if not use_first_pass_settings:
