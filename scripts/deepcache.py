@@ -43,14 +43,26 @@ class DeepCacheScript(scripts.Script):
                     hr_cache_interval = gr.Slider(label='HR Cache interval', minimum=1, maximum=1000, step=1, value=3)
                     hr_cache_depth = gr.Slider(label='HR Cache depth', minimum=0, maximum=12, step=1, value=5)
 
-        return deepcache_mode, cache_interval, cache_depth, start_step, end_step, force_step, hr_cache_interval, hr_cache_depth, use_first_pass_settings, pow_curve
+                with gr.Row(equal_height=True):
+                    hr_start_step = gr.Slider(label='HR Cache start sigma', minimum=0, maximum=80, step=0.01, value=2)
+                    hr_end_step = gr.Slider(label='HR Cache end sigma', minimum=0, maximum=1, step=0.01, value=0)
+
+            with gr.Accordion(open=False, label='Compatibility settings'):
+                apply_to_adetailer_pass = gr.Checkbox(label='Enable for ADetailer pass', value=True)
+
+        return deepcache_mode, cache_interval, cache_depth, start_step, end_step, force_step, hr_cache_interval, hr_cache_depth, hr_start_step, hr_end_step, use_first_pass_settings, pow_curve, apply_to_adetailer_pass
 
     def process_before_every_sampling(self, p, *script_args, **kwargs):
-        deepcache_mode, cache_interval, cache_depth, start_step, end_step, force_step, hr_cache_interval, hr_cache_depth, use_first_pass_settings, pow_curve = script_args
+        deepcache_mode, cache_interval, cache_depth, start_step, end_step, force_step, hr_cache_interval, hr_cache_depth, hr_start_step, hr_end_step, use_first_pass_settings, pow_curve, apply_to_adetailer_pass = script_args
 
         unet = p.sd_model.forge_objects.unet
 
         if (deepcache_mode == 'None') or (deepcache_mode == 'First' and p.is_hr_pass) or (deepcache_mode == 'Hires' and not p.is_hr_pass):
+            deepcache_helper.try_remove(unet)
+            return
+
+        is_ad_pass = getattr(p, "_ad_inner", False)
+        if is_ad_pass and not apply_to_adetailer_pass:
             deepcache_helper.try_remove(unet)
             return
 
@@ -65,25 +77,25 @@ class DeepCacheScript(scripts.Script):
             use_first_pass_settings=use_first_pass_settings,
             hr_cache_interval=hr_cache_interval,
             hr_cache_depth=hr_cache_depth,
+            hr_start_step=hr_start_step,
+            hr_end_step=hr_end_step,
             pow_curve=pow_curve
         ))
 
         if p.is_hr_pass: 
+            # For the hires pass, ignore various settings that we can't
+            # apply consistently.
+            pow_curve = 0                
+
             if not use_first_pass_settings:
                 cache_interval = hr_cache_interval
                 cache_depth = hr_cache_depth
+                start_step = hr_start_step
+                end_step = hr_end_step
 
-            # For the hires pass, ignore various settings that we can't
-            # apply consistently. Essentially, we use DeepCache for the entire
-            # hires process (if enabled)
-            pow_curve = 0                
-            start_step = 0
-            end_step = 999999999
-            force_step = 0
-        else:
-            start_step = 999999998 if start_step == 0 else 1000 - unet.model.model_sampling.timestep(torch.tensor(start_step)).item()
-            end_step = 999999999 if end_step == 0 else 1000 - unet.model.model_sampling.timestep(torch.tensor(end_step)).item()
-            force_step = 0 if force_step == 0 else 1000 - unet.model.model_sampling.timestep(torch.tensor(force_step)).item()
+        start_step = 999999998 if start_step == 0 else 1000 - unet.model.predictor.timestep(torch.tensor(start_step)).item()
+        end_step = 999999999 if end_step == 0 else 1000 - unet.model.predictor.timestep(torch.tensor(end_step)).item()
+        force_step = 0 if force_step == 0 else 1000 - unet.model.predictor.timestep(torch.tensor(force_step)).item()
 
         unet = deepcache_helper.apply(unet, cache_interval, cache_depth, start_step, end_step, force_step, pow_curve)[0]
         p.sd_model.forge_objects.unet = unet
