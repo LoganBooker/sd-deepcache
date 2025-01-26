@@ -9,15 +9,13 @@ force_step: after this step, ignore the interval and always use the cache
 '''
 
 import torch
-import math
-from ldm_patched.ldm.modules.diffusionmodules.openaimodel import forward_timestep_embed, timestep_embedding, th, apply_control
+from backend.nn.unet import timestep_embedding, apply_control
 import types
 
 class DeepCacheStore:
     def __init__(self, depth, interval, start_step, end_step, force_step, pow_curve):
         self.step_shape = None
         self.current_timestep = -1
-        self.total_steps = 0
 
         # TODO: Cache age... entries older than interval should probably not be reused.
 
@@ -106,8 +104,7 @@ class DeepCacheStore:
                     self.cache[key]["step"] += 1
                     self.cache[key]["timestep"] = self.current_timestep
         else:
-            for key in self.cache:
-                self.cache[key]["step"] = 0
+            self.cache = {}
 
 class DeepCache:
     ORIGINAL_FORWARD_ATTRIBUTE = "_deepcache_original_forward"
@@ -130,15 +127,6 @@ class DeepCache:
 
         @deepcache_patched_decorator
         def forward_deepcache_patched(self, x, timesteps=None, context=None, y=None, control=None, transformer_options={}, **kwargs):
-            """
-            Apply the model to an input batch.
-            :param x: an [N x C x ...] Tensor of inputs.
-            :param timesteps: a 1-D batch of timesteps.
-            :param context: conditioning plugged in via crossattn
-            :param y: an [N] Tensor of labels, if class-conditional.
-            :return: an [N x C x ...] Tensor of outputs.
-            """
-
             # Fetch the store from the model.
             cache_store = self._deepcache_store
 
@@ -146,23 +134,15 @@ class DeepCache:
             transformer_options["transformer_index"] = 0
             transformer_patches = transformer_options.get("patches", {})
             block_modifiers = transformer_options.get("block_modifiers", [])
-
-            # This code must be kept in sync.
-            # https://github.com/lllyasviel/stable-diffusion-webui-forge/blob/29be1da7cf2b5dccfc70fbdd33eb35c56a31ffb7/ldm_patched/ldm/modules/diffusionmodules/openaimodel.py#L831
-            assert (y is not None) == (
-                self.num_classes is not None
-            ), "must specify y if and only if the model is class-conditional"
+            assert (y is not None) == (self.num_classes is not None)
             hs = []
             t_emb = timestep_embedding(timesteps, self.model_channels, repeat_only=False).to(x.dtype)
             emb = self.time_embed(t_emb)
-
             if self.num_classes is not None:
                 assert y.shape[0] == x.shape[0]
                 emb = emb + self.label_emb(y)
-
             h = x
 
-            # DeepCache
             cache_store.setup(h, 1000 - timesteps[0].item())
 
             for id, module in enumerate(self.input_blocks):
@@ -171,48 +151,38 @@ class DeepCache:
                     break
 
                 transformer_options["block"] = ("input", id)
-
                 for block_modifier in block_modifiers:
                     h = block_modifier(h, 'before', transformer_options)
-
-                h = forward_timestep_embed(module, h, emb, context, transformer_options)
+                h = module(h, emb, context, transformer_options)
                 h = apply_control(h, control, 'input')
-
                 for block_modifier in block_modifiers:
                     h = block_modifier(h, 'after', transformer_options)
-
                 if "input_block_patch" in transformer_patches:
                     patch = transformer_patches["input_block_patch"]
                     for p in patch:
                         h = p(h, transformer_options)
-
                 hs.append(h)
                 if "input_block_patch_after_skip" in transformer_patches:
                     patch = transformer_patches["input_block_patch_after_skip"]
                     for p in patch:
                         h = p(h, transformer_options)
-
-            # DeepCache
+            
             if not cache_store.skip_unet_block("middle"):
                 transformer_options["block"] = ("middle", 0)
-
                 for block_modifier in block_modifiers:
                     h = block_modifier(h, 'before', transformer_options)
-
-                h = forward_timestep_embed(self.middle_block, h, emb, context, transformer_options)
+                h = self.middle_block(h, emb, context, transformer_options)
                 h = apply_control(h, control, 'middle')
-
                 for block_modifier in block_modifiers:
                     h = block_modifier(h, 'after', transformer_options)
 
-            block_count = len(self.output_blocks)
             for id, module in enumerate(self.output_blocks):
                 # DeepCache
-                if cache_store.skip_unet_block("output", id, block_count):
+                if cache_store.skip_unet_block("output", id, len(self.output_blocks)):
                     continue
 
                 # DeepCache - START
-                is_active, cache_step = cache_store.cache_unet_block(id, block_count)
+                is_active, cache_step = cache_store.cache_unet_block(id, len(self.output_blocks))
 
                 if is_active:
                     if cache_step:
@@ -224,24 +194,19 @@ class DeepCache:
                 transformer_options["block"] = ("output", id)
                 hsp = hs.pop()
                 hsp = apply_control(hsp, control, 'output')
-
                 if "output_block_patch" in transformer_patches:
                     patch = transformer_patches["output_block_patch"]
                     for p in patch:
                         h, hsp = p(h, hsp, transformer_options)
-
                 h = torch.cat([h, hsp], dim=1)
                 del hsp
                 if len(hs) > 0:
                     output_shape = hs[-1].shape
                 else:
                     output_shape = None
-
                 for block_modifier in block_modifiers:
                     h = block_modifier(h, 'before', transformer_options)
-
-                h = forward_timestep_embed(module, h, emb, context, transformer_options, output_shape)
-
+                h = module(h, emb, context, transformer_options, output_shape)
                 for block_modifier in block_modifiers:
                     h = block_modifier(h, 'after', transformer_options)
 
@@ -249,18 +214,16 @@ class DeepCache:
             cache_store.update_step()
 
             transformer_options["block"] = ("last", 0)
-
             for block_modifier in block_modifiers:
                 h = block_modifier(h, 'before', transformer_options)
-
-            if self.predict_codebook_ids:
-                h = self.id_predictor(h)
+            if "group_norm_wrapper" in transformer_options:
+                out_norm, out_rest = self.out[0], self.out[1:]
+                h = transformer_options["group_norm_wrapper"](out_norm, h, transformer_options)
+                h = out_rest(h)
             else:
                 h = self.out(h)
-            
             for block_modifier in block_modifiers:
                 h = block_modifier(h, 'after', transformer_options)
-
             return h.type(x.dtype)
 
         new_model = model.clone()
@@ -269,7 +232,7 @@ class DeepCache:
         # store the original forward pass on our patched method.
         if not hasattr(new_model.model.diffusion_model.forward, DeepCache.ORIGINAL_FORWARD_ATTRIBUTE):
             method_name = new_model.model.diffusion_model.forward.__qualname__
-            if (method_name != 'UNetModel.forward'):
+            if (method_name != 'IntegratedUNet2DConditionModel.forward'):
                 print(f"\n[DeepCache] Warning: Unet forward pass appears to be patched by another extension ({method_name})! DeepCache disabled.")
                 return
             
