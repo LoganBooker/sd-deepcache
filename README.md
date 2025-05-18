@@ -1,6 +1,6 @@
-# DeepCache for SD Forge
+# DeepCache for SD Forge Classic
 
-This is an implementation of [DeepCache: Accelerating Diffusion Models for Free](https://horseee.github.io/Diffusion_DeepCache/) for [SD Forge](https://github.com/lllyasviel/stable-diffusion-webui-forge). The core is basically [laksjdjf's ComfyUI node](https://gist.github.com/laksjdjf/435c512bc19636e9c9af4ee7bea9eb86), with a few of my own improvements.
+This is an implementation of [DeepCache: Accelerating Diffusion Models for Free](https://horseee.github.io/Diffusion_DeepCache/) for [Stable Diffusion WebUI Forge - Classic](https://github.com/Haoming02/sd-webui-forge-classic). The core is basically [laksjdjf's ComfyUI node](https://gist.github.com/laksjdjf/435c512bc19636e9c9af4ee7bea9eb86), with a few of my own improvements.
 
 Only tested with SDXL, but should work with other models.
 
@@ -36,3 +36,8 @@ For the hires pass, all the above settings are not used, except for the cache in
 - `Use first pass settings`: Ignore the values specified in the hires section and use the `Cache interval` and `Cache depth` from the main parameters.
 - `HR Cache interval`: if `Use first pass settings` is disabled, use this value for `Cache interval`.
 - `HR Cache depth`: if `Use first pass settings` is disabled, use this value for `Cache depth`.
+
+## Compatibility settings
+- `Smart sub-caching`: Uses stack inspection to allow sub-caches, making DeepCache work with other extensions that sample the model (such as PAG). Disable if you get errors or unexpected results when using such addons.
+- `Enable for ADetailer pass`: Disable if you want DeepCache to not be applied when an ADetailer pass is detected.
+- `Enable for img2img`: Disable if you want DeepCache to be disabled for any img2img pass that occurs during txt2img (except ADetailer, which always obeys the above setting).
