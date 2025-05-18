@@ -15,8 +15,7 @@ Only tested with SDXL, but should work with other models.
 
 ## Improvements
 
-- Keyed-cache dictionary to handle situations where the batch size changes during diffusion. This fixes errors such as `Expected size 2 but got size 1 for tensor number 1 in the list`, which is common when other extensions manipulate conditional/unconditional batching, such as Perturbed-Attention Guidance.
-- Cache interval power curve to increase the interval over time. A hard value to tune, but 4 works well when applying the cache from start to finish.
+- Smart sub-caching based on stack inspection to handle situations where other addons sample the model during txt2img. This fixes errors such as `Expected size 2 but got size 1 for tensor number 1 in the list`, which is common when other extensions manipulate conditional/unconditional batching, such as Perturbed-Attention Guidance.
 - Forcing the cache on after a certain sigma, which helps to avoid one or more costly and usually unneeded caching steps near the end of diffusion.
 
 ## Parameters
